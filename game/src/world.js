@@ -93,12 +93,45 @@ export function createWorld(random) {
   }
 
   function spawnParticle(x, y, type, size, color) {
-    entities.particles.push({ type: ENTITY_TYPES.PARTICLE, x, y, size, color, lifetime: PARTICLE.lifetime, spawnTime: Date.now() / 1000 });
+    const angle = Math.random() * Math.PI * 2;
+    const speed = type === 'explosion' ? 60 + Math.random() * 240 : 40 + Math.random() * 130;
+    entities.particles.push({ type: ENTITY_TYPES.PARTICLE, x, y, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed, size, color, lifetime: PARTICLE.lifetime * (0.6 + Math.random() * 0.7), spawnTime: Date.now() / 1000 });
+  }
+
+  // A kill should read as an explosion, not one fading square: a burst of
+  // sparks in the victim's own colour, with a white-hot core on big bursts.
+  function spawnBurst(x, y, color, count, withCore = true) {
+    for (let i = 0; i < count; i++) {
+      spawnParticle(x, y, 'explosion', PARTICLE.explosionSize * (0.6 + Math.random() * 0.8), color);
+    }
+    if (withCore) {
+      for (let i = 0; i < 3; i++) {
+        spawnParticle(x, y, 'explosion', PARTICLE.hitSize, COLORS.hitFlash);
+      }
+    }
+  }
+
+  function updateParticles(dt, now) {
+    for (let i = entities.particles.length - 1; i >= 0; i--) {
+      const particle = entities.particles[i];
+      if (now / 1000 - particle.spawnTime > particle.lifetime) {
+        entities.particles.splice(i, 1);
+        continue;
+      }
+      particle.x += particle.vx * dt;
+      particle.y += particle.vy * dt;
+      particle.vx *= 0.94;
+      particle.vy *= 0.94;
+    }
   }
 
   function spawnPowerup(x, y, type) {
     const color = type === 'rapid' ? '#0f0' : type === 'shield' ? '#0ff' : '#f00';
-    entities.powerups.push({ type: ENTITY_TYPES.POWERUP, x, y, type, color, duration: POWERUP[type].duration, width: POWERUP.width, height: POWERUP.height });
+    // POWERUP has no per-kind sub-objects, so POWERUP[type].duration here
+    // used to throw the first time any power-up dropped, aborting the
+    // step mid-collision. The durations live as flat fields instead.
+    const duration = type === 'rapid' ? POWERUP.rapidTime : type === 'shield' ? POWERUP.shieldDuration : POWERUP.bombEffectDuration;
+    entities.powerups.push({ type, x, y, color, duration, width: POWERUP.width, height: POWERUP.height });
   }
 
   function spawnEnemy(type, x, y) {
@@ -117,7 +150,7 @@ export function createWorld(random) {
       bullet.y += bullet.vy * dt;
       if (now / 1000 - bullet.spawnTime > bullet.lifetime) {
         entities.bullets.splice(i, 1);
-        spawnParticle(bullet.x, bullet.y, 'explosion', PARTICLE.explosionSize, COLORS.explosion);
+        spawnBurst(bullet.x, bullet.y, COLORS.explosion, 2, false);
       }
     }
   }
@@ -137,7 +170,14 @@ export function createWorld(random) {
       }
 
       if (enemy.type === 'wanderer') {
-        const wanderAngle = enemy.wanderTimer + Math.sin(now / 1000) * Math.PI;
+        // Wanderers used to steer by a free-running timer alone and could
+        // drift off-screen for half a minute, leaving the field empty.
+        // Now they weave around the approach vector: still wobbly, but
+        // they always close on the player.
+        const dx = playerPos.x - enemy.x;
+        const dy = playerPos.y - enemy.y;
+        const approachAngle = Math.atan2(dy, dx);
+        const wanderAngle = approachAngle + Math.sin(enemy.wanderTimer * 2.2) * 0.85;
         enemy.vx = Math.cos(wanderAngle) * ENEMY.wanderer.speed * (1 + (state.wave - 1) * 0.1);
         enemy.vy = Math.sin(wanderAngle) * ENEMY.wanderer.speed * (1 + (state.wave - 1) * 0.1);
         enemy.wanderTimer += dt;
@@ -149,6 +189,7 @@ export function createWorld(random) {
         const angle = Math.atan2(dy, dx);
         enemy.vx = Math.cos(angle) * ENEMY.splitter.speed * (1 + (state.wave - 1) * 0.15);
         enemy.vy = Math.sin(angle) * ENEMY.splitter.speed * (1 + (state.wave - 1) * 0.15);
+        enemy.rotation = angle;
       }
 
       if (enemy.type === 'shooter') {
@@ -156,16 +197,26 @@ export function createWorld(random) {
         const dy = playerPos.y - enemy.y;
         const distance = Math.sqrt(dx * dx + dy * dy);
         const angle = Math.atan2(dy, dx);
-        if (distance > 50) {
-          enemy.vx += Math.cos(angle) * 50 * dt;
-          enemy.vy += Math.sin(angle) * 50 * dt;
+        // Shooters close to firing range and hold it; their old drift
+        // (50/s^2 against 0.98 damping) left them crawling in from
+        // off-screen long after their wave had started.
+        if (distance > 240) {
+          enemy.vx += Math.cos(angle) * 260 * dt;
+          enemy.vy += Math.sin(angle) * 260 * dt;
+        } else {
+          enemy.vx *= 0.94;
+          enemy.vy *= 0.94;
         }
-        enemy.vx *= 0.98;
-        enemy.vy *= 0.98;
+        enemy.vx *= 0.985;
+        enemy.vy *= 0.985;
         enemy.rotation = angle;
-        if (now / 1000 - state.lastShotTime > ENEMY.shooter.fireRate * (state.rapidActive > 0 ? 0.5 : 1)) {
+        // Each shooter keeps its own fire timer. The old check read the
+        // PLAYER's lastShotTime, which the player's own fire resets many
+        // times a second, so shooters effectively never fired at all.
+        if (enemy.lastShot === undefined) enemy.lastShot = now / 1000 + Math.random();
+        if (now / 1000 - enemy.lastShot > ENEMY.shooter.fireRate) {
+          enemy.lastShot = now / 1000;
           entities.bullets.push({ type: 'orb', x: enemy.x, y: enemy.y, vx: Math.cos(enemy.rotation) * ENEMY.shooter.orbSpeed, vy: Math.sin(enemy.rotation) * ENEMY.shooter.orbSpeed, rotation: enemy.rotation, color: COLORS.shooter, lifetime: BULLET.lifetime, spawnTime: Date.now() / 1000, width: BULLET.width, height: BULLET.height });
-          return;
         }
       }
 
@@ -204,7 +255,7 @@ export function createWorld(random) {
             state.score += ENEMY[enemy.type].score;
             state.combo++;
             if (state.combo > state.highCombo) state.highCombo = state.combo;
-            spawnParticle(enemy.x, enemy.y, 'explosion', PARTICLE.explosionSize, COLORS.explosion);
+            spawnBurst(enemy.x, enemy.y, enemy.color, 12);
             if (Math.random() < POWERUP.chance) {
               const kinds = ['rapid', 'shield', 'bomb'];
               spawnPowerup(enemy.x, enemy.y, kinds[Math.floor(Math.random() * kinds.length)]);
@@ -225,7 +276,7 @@ export function createWorld(random) {
         events |= EVENT_HIT;
         spawnParticle(bullet.x, bullet.y, 'hit', PARTICLE.hitSize, COLORS.hitFlash);
         entities.bullets.splice(i, 1);
-        spawnParticle(bullet.x, bullet.y, 'explosion', PARTICLE.explosionSize, COLORS.explosion);
+        spawnBurst(bullet.x, bullet.y, COLORS.shooter, 5);
       }
     }
 
@@ -236,7 +287,7 @@ export function createWorld(random) {
       const dy = playerPos.y - enemy.y;
       if (Math.sqrt(dx * dx + dy * dy) < 40) {
         entities.enemies.splice(i, 1);
-        spawnParticle(enemy.x, enemy.y, 'explosion', PARTICLE.explosionSize, COLORS.explosion);
+        spawnBurst(enemy.x, enemy.y, enemy.color, 10);
         if (state.invincible <= 0) {
           events |= EVENT_HIT;
           state.invincible = 1.0;
@@ -260,19 +311,27 @@ export function createWorld(random) {
   }
 
   function spawnWave() {
+    // The wave counter used to never advance: the whole game idled on
+    // wave 1, difficulty never scaled and the wave-10 victory was
+    // unreachable. Every spawn after the first is the next wave.
+    if (state.enemiesSpawned > 0) {
+      state.wave++;
+    }
     const enemyTypes = ['chaser', 'wanderer', 'splitter', 'shooter'];
     const count = Math.min(state.maxEnemies, 3 + state.wave);
     for (let i = 0; i < count; i++) {
       const type = enemyTypes[Math.floor(Math.random() * enemyTypes.length)];
       const angle = (Math.PI * 2 / count) * i;
-      const radius = FIELD.width / 2 + 100;
-      const x = FIELD.width / 2 + Math.cos(angle) * radius;
-      const y = FIELD.height / 2 + Math.sin(angle) * radius;
+      // Spawn on an ellipse just past the field's edge, not a wide circle:
+      // on the old ring the top and bottom spawns sat 340px beyond the
+      // visible field and took seconds to walk in, stalling each wave.
+      const x = FIELD.width / 2 + Math.cos(angle) * (FIELD.width / 2 + 60);
+      const y = FIELD.height / 2 + Math.sin(angle) * (FIELD.height / 2 + 60);
       spawnEnemy(type, x, y);
     }
     state.enemiesSpawned = entities.enemies.length;
     state.spawnTimer = state.spawnInterval;
-    state.levelTimer = 5.0;
+    state.levelTimer = 2.5;
     return 'wave';
   }
 
@@ -287,6 +346,11 @@ export function createWorld(random) {
         state.invincible = POWERUP.shieldDuration;
         break;
       case 'bomb':
+        // The bomb used to clear the field in silence; now every victim
+        // visibly blows up before the field empties.
+        for (const enemy of entities.enemies) {
+          spawnBurst(enemy.x, enemy.y, enemy.color, 10);
+        }
         entities.enemies = [];
         state.bombActive = true;
         state.screenShake = 1.0;
@@ -330,7 +394,9 @@ export function createWorld(random) {
   function step(dt, input, playerPos) {
     let events = 0;
 
-    if (state.wave === 10) return EVENT_VICTORY;
+    // Victory is earned by clearing the final wave, not by reaching it:
+    // this check runs before any new wave can spawn.
+    if (state.wave >= 10 && entities.enemies.length === 0 && state.enemiesSpawned > 0) return EVENT_VICTORY;
 
     state.levelTimer -= dt;
     if (state.levelTimer <= 0) {
@@ -358,6 +424,8 @@ export function createWorld(random) {
     updateEnemies(dt, playerPos, Date.now());
 
     updatePowerups(dt, Date.now());
+
+    updateParticles(dt, Date.now());
 
     const collisionEvents = checkCollisions(playerPos, Date.now());
     if (collisionEvents & EVENT_HIT) {

@@ -55,7 +55,7 @@ export const POWERUP = {
 };
 
 export const HUD = {
-  font: '12px monospace',
+  font: 'monospace',
   scoreColor: '#0ff',
   waveColor: '#f0f',
   hpColor: '#f00',
@@ -70,8 +70,8 @@ export const COLORS = {
  star1: '#fff',
  star2: '#ccf',
  star3: '#f0f',
- nebula1: { r: 30, g: 0, b: 60 },
- nebula2: { r: 0, g: 30, b: 60 },
+ nebula1: { r: 80, g: 24, b: 140 },
+ nebula2: { r: 12, g: 60, b: 130 },
  player: '#0ff',
  bullet: '#fff',
  chaser: '#f0f',
